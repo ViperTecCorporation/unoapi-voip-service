@@ -224,6 +224,7 @@ Este projeto agora possui arquivos basicos para containerizacao seguindo o estil
 
 - `Dockerfile`
 - `docker-compose.portainer.yml`
+- `.github/workflows/main.yml`
 
 Uso local com Docker:
 
@@ -256,6 +257,38 @@ Observacao importante:
 - o plano de controle e signaling ja esta integrado
 - o plano de midia real (audio/relay/UDP) ainda nao foi implementado neste servico
 - entao ainda nao faz sentido abrir portas UDP de audio no compose atual
+
+## Build automatica por tag
+
+O projeto agora tem um workflow inspirado na UnoAPI em:
+
+- `.github/workflows/main.yml`
+
+Comportamento:
+
+- push em `main` ou `develop`: roda `npm ci`, `npm run typecheck` e `npm run build`
+- pull request para `main` ou `develop`: roda os mesmos checks
+- push de tag `v*.*.*`: alem dos checks, builda e publica a imagem Docker no GHCR
+
+Imagem publicada:
+
+- `ghcr.io/<owner>/<repo>:<tag>`
+- `ghcr.io/<owner>/<repo>:latest` nao e forcado pelo workflow atual
+- tambem sao geradas tags auxiliares de branch e `sha`
+
+Exemplo:
+
+- repositorio: `seu-user/unoapi-voip-service`
+- tag Git: `v0.1.0`
+- imagem publicada: `ghcr.io/seu-user/unoapi-voip-service:v0.1.0`
+
+Para isso funcionar no GitHub:
+
+- o repositorio precisa existir no GitHub
+- o Actions precisa estar habilitado
+- o pacote no GHCR sera publicado com o `GITHUB_TOKEN` padrao do workflow
+
+Depois disso, o Portainer pode consumir diretamente a imagem publicada no GHCR em vez de buildar localmente.
 
 ## Integracao com `@w3nder/whatsapp-voip-wasm`
 
