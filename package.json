@@ -1,0 +1,26 @@
+{
+  "name": "unoapi-voip-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Servico auxiliar de VoIP para integrar @w3nder/whatsapp-voip-wasm com a UnoAPI",
+  "main": "dist/app.js",
+  "types": "dist/app.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && npm run copy-resources",
+    "copy-resources": "mkdir -p dist/vendor/w3nder-whatsapp-voip-wasm/lib/wasm-resources && cp src/vendor/w3nder-whatsapp-voip-wasm/lib/worker-bootstrap.js dist/vendor/w3nder-whatsapp-voip-wasm/lib/ && cp src/vendor/w3nder-whatsapp-voip-wasm/lib/wasm-resources/loader.js dist/vendor/w3nder-whatsapp-voip-wasm/lib/wasm-resources/ && cp src/vendor/w3nder-whatsapp-voip-wasm/lib/wasm-resources/worker-modules.js dist/vendor/w3nder-whatsapp-voip-wasm/lib/wasm-resources/ && cp src/vendor/w3nder-whatsapp-voip-wasm/lib/wasm-resources/whatsapp.wasm dist/vendor/w3nder-whatsapp-voip-wasm/lib/wasm-resources/",
+    "dev": "tsx watch src/app.ts",
+    "start": "node dist/app.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "pino": "^9.7.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.1",
+    "@types/node": "^22.13.14",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

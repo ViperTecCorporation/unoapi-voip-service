@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  unoapi-voip:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vipertec/unoapi-voip-service:latest
+    container_name: unoapi-voip
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: ${PORT:-3097}
+      VOIP_SERVICE_TOKEN: ${VOIP_SERVICE_TOKEN}
+    ports:
+      - "${PORT:-3097}:3097"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3097/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
