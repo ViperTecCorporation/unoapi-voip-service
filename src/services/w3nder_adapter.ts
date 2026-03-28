@@ -12,6 +12,7 @@ interface SessionRuntime {
 
 export class W3nderVoipAdapter {
   private sessions = new Map<string, SessionRuntime>()
+  private sessionInitializations = new Map<string, Promise<SessionRuntime>>()
 
   async isAvailable(): Promise<boolean> {
     return true
@@ -38,7 +39,14 @@ export class W3nderVoipAdapter {
       logger.debug({ session, pendingCommands: existing.pendingCommands.length }, 'reusing existing voip session runtime')
       return { runtime: existing, commands: this.drainCommands(existing) }
     }
+    const pending = this.sessionInitializations.get(session)
+    if (pending) {
+      logger.info({ session }, 'awaiting in-flight voip session initialization')
+      const runtime = await pending
+      return { runtime, commands: this.drainCommands(runtime) }
+    }
 
+    const initialization = (async (): Promise<SessionRuntime> => {
     const { selfJid, selfLid } = this.buildSelfJids(session)
     const pendingCommands: VoipCommand[] = []
     const startedAt = Date.now()
@@ -117,7 +125,16 @@ export class W3nderVoipAdapter {
       },
       'voip session runtime created'
     )
-    return { runtime, commands: this.drainCommands(runtime) }
+      return runtime
+    })()
+
+    this.sessionInitializations.set(session, initialization)
+    try {
+      const runtime = await initialization
+      return { runtime, commands: this.drainCommands(runtime) }
+    } finally {
+      this.sessionInitializations.delete(session)
+    }
   }
 
   private extractCallId(eventData?: string): string {
