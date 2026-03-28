@@ -23,9 +23,16 @@ export const signalingPayloadSchema = z.object({
   session: z.string().min(1),
   callId: z.string().min(1),
   peerJid: z.string().min(1),
-  payload: z.string().min(1),
+  payload: z.string().optional(),
+  payloadBase64: z.string().optional(),
+  payloadEncoding: z.enum(['xml', 'wa_binary']).optional(),
+  attrs: z.record(z.string()).optional(),
+  outerAttrs: z.record(z.string()).optional(),
+  encAttrs: z.record(z.string()).optional(),
   msgType: z.string().optional(),
   timestamp: z.number().int().optional(),
+}).refine((value) => !!value.payload || !!value.payloadBase64, {
+  message: 'payload or payloadBase64 is required',
 })
 
 export type CallEventPayload = z.infer<typeof callEventPayloadSchema>
