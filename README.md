@@ -257,6 +257,7 @@ Observacao importante:
 - o plano de controle e signaling ja esta integrado
 - o plano de midia real (audio/relay/UDP) ainda nao foi implementado neste servico
 - entao ainda nao faz sentido abrir portas UDP de audio no compose atual
+- o healthcheck da imagem e do compose usa `node` + `fetch('/health')`, sem depender de `wget` ou `curl`
 
 ## Build automatica por tag
 

@@ -34,10 +34,16 @@ export class W3nderVoipAdapter {
 
   async ensureSession(session: string): Promise<{ runtime?: SessionRuntime; commands: VoipCommand[] }> {
     const existing = this.sessions.get(session)
-    if (existing) return { runtime: existing, commands: this.drainCommands(existing) }
+    if (existing) {
+      logger.debug({ session, pendingCommands: existing.pendingCommands.length }, 'reusing existing voip session runtime')
+      return { runtime: existing, commands: this.drainCommands(existing) }
+    }
 
     const { selfJid, selfLid } = this.buildSelfJids(session)
     const pendingCommands: VoipCommand[] = []
+    const startedAt = Date.now()
+
+    logger.info({ session, selfJid, selfLid }, 'creating voip session runtime')
     const voip = new WhatsAppVoipWasm({
       enableLogs: false,
       callbacks: {
@@ -50,6 +56,16 @@ export class W3nderVoipAdapter {
             payloadBase64: Buffer.from(xmlPayload).toString('base64'),
             payloadTag: 'call',
           })
+          logger.info(
+            {
+              session,
+              callId,
+              peerJid,
+              payloadBytes: xmlPayload.byteLength,
+              pendingCommands: pendingCommands.length,
+            },
+            'queued send_call_node command from wasm'
+          )
         },
         onCallEvent: (eventType: number, eventData?: string) => {
           pendingCommands.push({
@@ -59,6 +75,14 @@ export class W3nderVoipAdapter {
             eventType,
             eventData,
           })
+          logger.info(
+            {
+              session,
+              eventType,
+              pendingCommands: pendingCommands.length,
+            },
+            'queued voip event command from wasm'
+          )
         },
         onVoipReady: () => {
           logger.info({ session }, 'w3nder voip stack ready')
@@ -70,8 +94,11 @@ export class W3nderVoipAdapter {
       },
     })
 
+    logger.info({ session }, 'initializing w3nder voip wasm')
     await voip.initialize()
+    logger.info({ session }, 'w3nder voip wasm initialized')
     voip.initVoipStack(selfJid, selfJid, selfLid)
+    logger.info({ session }, 'waiting for voip stack ready')
     await voip.waitForVoipStackReady()
 
     const runtime: SessionRuntime = {
@@ -82,6 +109,14 @@ export class W3nderVoipAdapter {
       pendingCommands,
     }
     this.sessions.set(session, runtime)
+    logger.info(
+      {
+        session,
+        durationMs: Date.now() - startedAt,
+        pendingCommands: pendingCommands.length,
+      },
+      'voip session runtime created'
+    )
     return { runtime, commands: this.drainCommands(runtime) }
   }
 
@@ -96,6 +131,7 @@ export class W3nderVoipAdapter {
   }
 
   async handleCallEvent(payload: CallEventPayload): Promise<VoipCommand[]> {
+    const startedAt = Date.now()
     const { runtime, commands } = await this.ensureSession(payload.session)
     if (!runtime) return commands
 
@@ -110,10 +146,22 @@ export class W3nderVoipAdapter {
       logger.warn(error, 'failed to process call event in w3nder adapter')
     }
 
-    return [...commands, ...this.drainCommands(runtime)]
+    const out = [...commands, ...this.drainCommands(runtime)]
+    logger.info(
+      {
+        session: payload.session,
+        callId: payload.callId,
+        event: payload.event,
+        commandCount: out.length,
+        durationMs: Date.now() - startedAt,
+      },
+      'processed call event in w3nder adapter'
+    )
+    return out
   }
 
   async handleSignaling(payload: SignalingPayload): Promise<VoipCommand[]> {
+    const startedAt = Date.now()
     const { runtime, commands } = await this.ensureSession(payload.session)
     if (!runtime) return commands
 
@@ -147,7 +195,19 @@ export class W3nderVoipAdapter {
       logger.warn(error, 'failed to process signaling in w3nder adapter')
     }
 
-    return [...commands, ...this.drainCommands(runtime)]
+    const out = [...commands, ...this.drainCommands(runtime)]
+    logger.info(
+      {
+        session: payload.session,
+        callId: payload.callId,
+        peerJid: payload.peerJid,
+        msgType: payload.msgType || 'unknown',
+        commandCount: out.length,
+        durationMs: Date.now() - startedAt,
+      },
+      'processed signaling in w3nder adapter'
+    )
+    return out
   }
 }
 
