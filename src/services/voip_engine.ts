@@ -35,6 +35,8 @@ export class VoipEngine {
         callId: payload.callId,
         from: payload.from,
         callerPn: payload.callerPn,
+        isGroup: payload.isGroup,
+        groupJid: payload.groupJid,
         isVideo: payload.isVideo,
         lastEvent: payload.event,
         updatedAt: Date.now(),

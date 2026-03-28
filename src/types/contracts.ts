@@ -14,6 +14,8 @@ export const callEventPayloadSchema = z.object({
   callId: z.string().min(1),
   from: z.string().min(1),
   callerPn: z.string().optional(),
+  isGroup: z.boolean().optional(),
+  groupJid: z.string().optional(),
   isVideo: z.boolean().optional(),
   timestamp: z.number().int().optional(),
   raw: z.unknown().optional(),
@@ -25,6 +27,9 @@ export const signalingPayloadSchema = z.object({
   peerJid: z.string().min(1),
   payload: z.string().optional(),
   payloadBase64: z.string().optional(),
+  rawDecryptedCallFrameBase64: z.string().optional(),
+  rawOfferWapNoPrefixBase64: z.string().optional(),
+  rawOfferChildWapBase64: z.string().optional(),
   payloadEncoding: z.enum(['xml', 'wa_binary']).optional(),
   attrs: z.record(z.string()).optional(),
   outerAttrs: z.record(z.string()).optional(),
@@ -66,6 +71,8 @@ export interface CallSessionState {
   callId: string
   from: string
   callerPn?: string
+  isGroup?: boolean
+  groupJid?: string
   isVideo?: boolean
   lastEvent: string
   updatedAt: number

@@ -1,6 +1,7 @@
 import logger from './logger'
 import { CallEventPayload, SignalingPayload, VoipCommand } from '../types/contracts'
 import { WhatsAppVoipWasm } from '../vendor/w3nder-whatsapp-voip-wasm/lib/WhatsAppVoipWasm'
+import { inflateSync } from 'zlib'
 
 interface SessionRuntime {
   session: string
@@ -8,6 +9,16 @@ interface SessionRuntime {
   selfLid: string
   voip: WhatsAppVoipWasm
   pendingCommands: VoipCommand[]
+  pendingRejectContexts: Map<string, RejectWithoutContextPayload>
+}
+
+interface RejectWithoutContextPayload {
+  peerJid: string
+  callId: string
+  callCreator: string
+  peerDevice: string
+  isGroupCall: boolean
+  isVideoCall: boolean
 }
 
 export class W3nderVoipAdapter {
@@ -51,6 +62,65 @@ export class W3nderVoipAdapter {
     return undefined
   }
 
+  private decodeBase64Buffer(base64?: string): Buffer | undefined {
+    if (!base64) return undefined
+    try {
+      return Buffer.from(base64, 'base64')
+    } catch {
+      return undefined
+    }
+  }
+
+  private buildOfferPayloadVariants(payload: SignalingPayload) {
+    const variants: Array<{ name: string; payload: string; byteLength: number; previewHex?: string }> = []
+    const addVariant = (name: string, buffer?: Buffer) => {
+      if (!buffer?.length) return
+      const payloadBase64 = buffer.toString('base64')
+      if (variants.some((item) => item.payload === payloadBase64)) return
+      variants.push({
+        name,
+        payload: payloadBase64,
+        byteLength: buffer.byteLength,
+        previewHex: buffer.subarray(0, 24).toString('hex'),
+      })
+    }
+
+    const rawFrame = this.decodeBase64Buffer(payload.rawDecryptedCallFrameBase64)
+    const rawOfferWapNoPrefix = this.decodeBase64Buffer(payload.rawOfferWapNoPrefixBase64)
+    const rawOfferChildWap = this.decodeBase64Buffer(payload.rawOfferChildWapBase64)
+    const basePayload = this.decodeBase64Buffer(payload.payloadBase64)
+
+    addVariant('raw_decrypted_call_frame', rawFrame)
+    addVariant('raw_offer_child_wap', rawOfferChildWap)
+    if (rawOfferChildWap && rawOfferChildWap.byteLength > 2 && rawOfferChildWap[0] === 0xf8 && rawOfferChildWap[1] === 0x01) {
+      addVariant('raw_offer_child_wap_strip_list_wrapper', rawOfferChildWap.subarray(2))
+    }
+    addVariant('raw_offer_wap_no_prefix', rawOfferWapNoPrefix)
+    addVariant('payload_base64', basePayload)
+
+    if (rawFrame && rawFrame.byteLength > 1) {
+      addVariant('raw_decrypted_strip_first_byte', rawFrame.subarray(1))
+      if (rawFrame.byteLength > 3 && rawFrame[1] === 0x78 && rawFrame[2] === 0x9c) {
+        try {
+          addVariant('raw_decrypted_inflate_after_first_byte', inflateSync(rawFrame.subarray(1)))
+        } catch (error) {
+          logger.info(
+            {
+              session: payload.session,
+              callId: payload.callId,
+              peerJid: payload.peerJid,
+              variant: 'raw_decrypted_inflate_after_first_byte',
+              err: error,
+            },
+            'failed to inflate raw decrypted call frame variant'
+          )
+        }
+      }
+    }
+
+    return variants
+  }
+
   async isAvailable(): Promise<boolean> {
     return true
   }
@@ -70,6 +140,35 @@ export class W3nderVoipAdapter {
     return out
   }
 
+  private buildRejectWithoutContextPayload(
+    callId: string,
+    peerJid: string,
+    payload: Pick<SignalingPayload, 'attrs' | 'outerAttrs' | 'encAttrs'>
+  ): RejectWithoutContextPayload {
+    const getAttr = (...keys: string[]) => {
+      for (const key of keys) {
+        const value = payload.attrs?.[key] ?? payload.outerAttrs?.[key] ?? payload.encAttrs?.[key]
+        if (value !== undefined && value !== null && `${value}`.trim()) return `${value}`.trim()
+      }
+      return ''
+    }
+
+    const truthy = (value: string) => ['1', 'true', 'video'].includes(value.trim().toLowerCase())
+    const callCreator = getAttr('call-creator', 'call_creator', 'creator', 'from') || peerJid
+    const peerDevice = getAttr('platform', 'device', 'peer_device', 'peerDevice') || 'unknown'
+    const isGroupCall = !!getAttr('group_jid', 'group-id', 'groupId')
+    const isVideoCall = truthy(getAttr('is_video', 'isVideo', 'video', 'has_video'))
+
+    return {
+      peerJid,
+      callId,
+      callCreator,
+      peerDevice,
+      isGroupCall,
+      isVideoCall,
+    }
+  }
+
   async ensureSession(session: string): Promise<{ runtime?: SessionRuntime; commands: VoipCommand[] }> {
     const existing = this.sessions.get(session)
     if (existing) {
@@ -86,6 +185,7 @@ export class W3nderVoipAdapter {
     const initialization = (async (): Promise<SessionRuntime> => {
     const { selfJid, selfLid } = this.buildSelfJids(session)
     const pendingCommands: VoipCommand[] = []
+    const pendingRejectContexts = new Map<string, RejectWithoutContextPayload>()
     const startedAt = Date.now()
 
     logger.info({ session, selfJid, selfLid }, 'creating voip session runtime')
@@ -93,12 +193,13 @@ export class W3nderVoipAdapter {
       enableLogs: true,
       callbacks: {
         onSignalingXmpp: async (peerJid: string, callId: string, xmlPayload: Uint8Array) => {
+          const payloadBuffer = Buffer.from(xmlPayload)
           pendingCommands.push({
             action: 'send_call_node',
             session,
             callId,
             peerJid,
-            payloadBase64: Buffer.from(xmlPayload).toString('base64'),
+            payloadBase64: payloadBuffer.toString('base64'),
             payloadTag: 'call',
           })
           logger.info(
@@ -107,6 +208,8 @@ export class W3nderVoipAdapter {
               callId,
               peerJid,
               payloadBytes: xmlPayload.byteLength,
+              payloadPreviewHex: payloadBuffer.subarray(0, 32).toString('hex'),
+              payloadPreviewBase64: payloadBuffer.subarray(0, 32).toString('base64'),
               pendingCommands: pendingCommands.length,
             },
             'queued send_call_node command from wasm'
@@ -197,6 +300,7 @@ export class W3nderVoipAdapter {
       selfLid,
       voip,
       pendingCommands,
+      pendingRejectContexts,
     }
     this.sessions.set(session, runtime)
     logger.info(
@@ -244,11 +348,43 @@ export class W3nderVoipAdapter {
         },
         'processing call event in w3nder adapter'
       )
-      if (payload.event === 'call_rejected' && typeof runtime.voip.rejectCall === 'function') {
-        runtime.voip.rejectCall()
+      if (payload.event === 'call_rejected') {
+        const callInfoBefore = runtime.voip.getCallInfo()
+        if (callInfoBefore && typeof runtime.voip.rejectCall === 'function') {
+          runtime.voip.rejectCall()
+        } else {
+          const fallback = runtime.pendingRejectContexts.get(payload.callId)
+          if (fallback) {
+            runtime.voip.rejectCallWithoutCallContext(
+              payload.callerPn || fallback.peerJid,
+              payload.callId,
+              fallback.callCreator,
+              2,
+              fallback.peerDevice,
+              payload.isGroup ?? fallback.isGroupCall,
+              payload.isVideo ?? fallback.isVideoCall
+            )
+            logger.info(
+              {
+                session: payload.session,
+                callId: payload.callId,
+                peerJid: payload.callerPn || fallback.peerJid,
+                callCreator: fallback.callCreator,
+                peerDevice: fallback.peerDevice,
+                isGroupCall: payload.isGroup ?? fallback.isGroupCall,
+                isVideoCall: payload.isVideo ?? fallback.isVideoCall,
+                groupJid: payload.groupJid,
+              },
+              'used rejectCallWithoutCallContext fallback'
+            )
+          }
+        }
       }
       if (payload.event === 'call_ended' && typeof runtime.voip.endCall === 'function') {
         runtime.voip.endCall(0, false)
+      }
+      if (['call_rejected', 'call_ended', 'call_timeout', 'call_error'].includes(payload.event)) {
+        runtime.pendingRejectContexts.delete(payload.callId)
       }
       logger.info(
         {
@@ -281,7 +417,9 @@ export class W3nderVoipAdapter {
     const startedAt = Date.now()
     const { runtime, commands } = await this.ensureSession(payload.session)
     if (!runtime) return commands
-    const decodedPayload = this.decodeIncomingSignalingPayload(payload)
+    const decodedPayload = payload.msgType === 'offer' && payload.rawDecryptedCallFrameBase64
+      ? payload.rawDecryptedCallFrameBase64
+      : this.decodeIncomingSignalingPayload(payload)
 
     try {
       logger.info(
@@ -292,6 +430,7 @@ export class W3nderVoipAdapter {
           msgType: payload.msgType || 'unknown',
           payloadEncoding: payload.payloadEncoding || (payload.payloadBase64 ? 'wa_binary' : 'xml'),
           payloadBytes: payload.payloadBase64 ? Buffer.from(payload.payloadBase64, 'base64').byteLength : undefined,
+          rawDecryptedCallFrameBytes: payload.rawDecryptedCallFrameBase64 ? Buffer.from(payload.rawDecryptedCallFrameBase64, 'base64').byteLength : undefined,
           attrs: payload.attrs,
           outerAttrs: payload.outerAttrs,
           encAttrs: payload.encAttrs,
@@ -301,11 +440,64 @@ export class W3nderVoipAdapter {
         'processing signaling in w3nder adapter'
       )
       if (payload.msgType === 'offer') {
-        runtime.voip.handleSignalingOffer({
-          payload: decodedPayload,
-          peerJid: payload.peerJid,
-          isContact: true,
-        })
+        runtime.pendingRejectContexts.set(
+          payload.callId,
+          this.buildRejectWithoutContextPayload(payload.callId, payload.peerJid, payload)
+        )
+        const offerVariants = this.buildOfferPayloadVariants(payload)
+        logger.info(
+          {
+            session: payload.session,
+            callId: payload.callId,
+            peerJid: payload.peerJid,
+            offerPayloadBytes: payload.payloadBase64 ? Buffer.from(payload.payloadBase64, 'base64').byteLength : undefined,
+            rawDecryptedCallFrameBytes: payload.rawDecryptedCallFrameBase64 ? Buffer.from(payload.rawDecryptedCallFrameBase64, 'base64').byteLength : undefined,
+            variants: offerVariants.map((variant) => ({
+              name: variant.name,
+              byteLength: variant.byteLength,
+              previewHex: variant.previewHex,
+            })),
+          },
+          'offer payload selection diagnostics'
+        )
+        for (const variant of offerVariants) {
+          logger.info(
+            {
+              session: payload.session,
+              callId: payload.callId,
+              peerJid: payload.peerJid,
+              variant: variant.name,
+              byteLength: variant.byteLength,
+              previewHex: variant.previewHex,
+            },
+            'trying offer payload variant'
+          )
+          const epochId = this.getAttr(payload, 'e', 'epoch-id', 'epochId') || undefined
+          const peerPlatform = this.getPeerPlatform(payload)
+          const peerAppVersion = this.getAttr(payload, 'version', 'peer_app_version', 'peerAppVersion') || undefined
+          runtime.voip.handleSignalingOffer({
+            payload: variant.payload,
+            peerPlatform,
+            peerAppVersion,
+            epochId,
+            timestamp: payload.timestamp ? `${payload.timestamp}` : '0',
+            isOffline: false,
+            peerJid: payload.peerJid,
+            isContact: true,
+          })
+          const callInfoAfterVariant = runtime.voip.getCallInfo()
+          logger.info(
+            {
+              session: payload.session,
+              callId: payload.callId,
+              peerJid: payload.peerJid,
+              variant: variant.name,
+              callInfoAfterVariant,
+            },
+            'offer payload variant result'
+          )
+          if (callInfoAfterVariant) break
+        }
       } else if (payload.msgType === 'ack') {
         runtime.voip.handleSignalingAck({
           payload: decodedPayload,
